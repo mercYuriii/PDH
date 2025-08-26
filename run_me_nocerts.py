@@ -46,6 +46,8 @@ from typing import Dict, Optional, Tuple
 
 import pandas as pd
 from difflib import SequenceMatcher
+import sys
+import os
 
 # GUI imports (lazy-used when --gui flag is set)
 import threading
@@ -774,11 +776,15 @@ def run_pipeline(
 
 
 def main():
+    # If launched with no arguments (e.g., double-clicked app), open GUI by default
+    if len(sys.argv) == 1:
+        launch_gui()
+        return
     parser = argparse.ArgumentParser(
         description="Prepare credit-hour master list (no certificates) with email-based canonicalization."
     )
-    parser.add_argument("--file_a", required=True, help="Path to File A (Name, Hours, Event)")
-    parser.add_argument("--file_b", required=True, help="Path to File B (Category, Subcategory, Full Name, Country, Email, CC Email, First Conference)")
+    parser.add_argument("--file_a", required=False, help="Path to File A (Name, Hours, Event)")
+    parser.add_argument("--file_b", required=False, help="Path to File B (Category, Subcategory, Full Name, Country, Email, CC Email, First Conference)")
     parser.add_argument("--out_dir", default="output_nocerts", help="Output directory path")
     parser.add_argument("--category", required=False, help="Optional Category filter (e.g., 'User')")
     parser.add_argument("--min_match", type=float, default=0.85, help="Minimum fuzzy match score (0-1)")
@@ -786,6 +792,11 @@ def main():
     parser.add_argument("--decisions_path", required=False, help="Path to decisions file (use proposed_matches.xlsx or a CSV). Optional.")
     parser.add_argument("--gui", action="store_true", help="Launch graphical app instead of CLI")
     args = parser.parse_args()
+
+    # If not using GUI, require the two input files
+    if not args.gui:
+        if not args.file_a or not args.file_b:
+            parser.error("the following arguments are required in CLI mode: --file_a, --file_b")
 
     if args.gui:
         launch_gui()
