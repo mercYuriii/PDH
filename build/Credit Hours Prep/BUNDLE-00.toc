@@ -1,0 +1,3 @@
+([('Credit Hours Prep',
+   '/Users/yuricarreiraalflen/Desktop/PDH/dist/Credit Hours Prep',
+   'EXECUTABLE')],)
