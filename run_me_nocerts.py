@@ -570,13 +570,15 @@ def run_pipeline(
             # Auto-accept only when Certain; otherwise leave blank for human review
             entry["Decision"] = "ACCEPT" if is_certain else ""
             entry["Chosen_Email"] = ""
+            # New: allow user to enter 1/2/3 or a manual email in the proposals sheet
+            entry["Pick"] = "1" if is_certain else ""
         else:
             # No candidates — force review
             entry.update({
                 "Top1_Name_B": "", "Top1_Email": "", "Top1_Score": "",
                 "Top2_Name_B": "", "Top2_Email": "", "Top2_Score": "",
                 "Top3_Name_B": "", "Top3_Email": "", "Top3_Score": "",
-                "Certain": False, "Suggested_Email": "", "Decision": "", "Chosen_Email": ""
+                "Certain": False, "Suggested_Email": "", "Decision": "", "Chosen_Email": "", "Pick": ""
             })
         proposal_rows.append(entry)
 
@@ -676,30 +678,95 @@ def run_pipeline(
                 dec = pd.read_csv(dec_path).fillna("")
             # Normalize headers
             cmap = {c.lower().strip(): c for c in dec.columns}
-            fnc = cmap.get("fullname_a") or "FullName_A"
-            sugg = cmap.get("suggested_email") or "Suggested_Email"
-            deci = cmap.get("decision") or "Decision"
+            fnc   = cmap.get("fullname_a") or "FullName_A"
+            sugg  = cmap.get("suggested_email") or "Suggested_Email"
+            deci  = cmap.get("decision") or "Decision"
             chosen = cmap.get("chosen_email") or "Chosen_Email"
-            for c in (fnc, sugg, deci, chosen):
+            # Optional Top columns (may not be present in CSVs)
+            t1n = cmap.get("top1_name_b") or "Top1_Name_B"
+            t1e = cmap.get("top1_email")  or "Top1_Email"
+            t2n = cmap.get("top2_name_b") or "Top2_Name_B"
+            t2e = cmap.get("top2_email")  or "Top2_Email"
+            t3n = cmap.get("top3_name_b") or "Top3_Name_B"
+            t3e = cmap.get("top3_email")  or "Top3_Email"
+            pick = cmap.get("pick") or "Pick"
+
+            needed_cols = [fnc, sugg, deci, chosen, t1n, t1e, t2n, t2e, t3n, t3e, pick]
+            for c in needed_cols:
                 if c not in dec.columns:
                     dec[c] = ""
-            dec = dec[[fnc, sugg, deci, chosen]].copy()
-            dec.columns = ["FullName_A", "Suggested_Email", "Decision", "Chosen_Email"]
+            dec = dec[[fnc, sugg, deci, chosen, t1n, t1e, t2n, t2e, t3n, t3e, pick]].copy()
+            dec.columns = ["FullName_A", "Suggested_Email", "Decision", "Chosen_Email",
+                           "Top1_Name_B", "Top1_Email", "Top2_Name_B", "Top2_Email", "Top3_Name_B", "Top3_Email", "Pick"]
 
             df_joined_events = df_joined_events.merge(dec, on="FullName_A", how="left")
-            # Apply decisions (ACCEPT/REJECT) with optional Chosen_Email
+
+            # Prepare a roster lookup by Email to enrich fields (Category, Subcategory, Country, etc.)
+            bcols = ["Full Name", "Category", "Subcategory", "Country", "Email", "CC Email", "First Conference"]
+            b_lookup_by_email = df_b.dropna(subset=["Email"]).set_index("Email")[bcols].to_dict(orient="index")  # type: ignore
+
+            # Apply decisions (ACCEPT/REJECT) with optional Chosen_Email mapped to Top candidates or Pick
             for idx, row in df_joined_events.iterrows():
                 decision = str(row.get("Decision", "")).strip().upper()
                 chosen_email = str(row.get("Chosen_Email", "")).strip()
                 suggested_email = str(row.get("Suggested_Email", "")).strip()
-                if decision == "ACCEPT":
+                # Resolve Pick (user can enter 1/2/3 to select TopN, or type a manual email)
+                pick_val = str(row.get("Pick", "")).strip()
+                if pick_val:
+                    if pick_val in {"1", "2", "3"}:
+                        if pick_val == "1" and str(row.get("Top1_Email", "")).strip():
+                            chosen_email = str(row.get("Top1_Email", "")).strip()
+                        elif pick_val == "2" and str(row.get("Top2_Email", "")).strip():
+                            chosen_email = str(row.get("Top2_Email", "")).strip()
+                        elif pick_val == "3" and str(row.get("Top3_Email", "")).strip():
+                            chosen_email = str(row.get("Top3_Email", "")).strip()
+                    elif "@" in pick_val:
+                        chosen_email = pick_val
+                # Accept if decision is ACCEPT, or if Pick is filled (unless explicitly REJECT)
+                if decision == "ACCEPT" or (decision == "" and pick_val):
                     email_to_set = chosen_email or suggested_email
                     if email_to_set:
+                        # Determine the chosen candidate name from Top1/Top2/Top3 based on the selected email or Pick
+                        chosen_name = ""
+                        if email_to_set == str(row.get("Top1_Email", "")).strip():
+                            chosen_name = str(row.get("Top1_Name_B", "")).strip()
+                        elif email_to_set == str(row.get("Top2_Email", "")).strip():
+                            chosen_name = str(row.get("Top2_Name_B", "")).strip()
+                        elif email_to_set == str(row.get("Top3_Email", "")).strip():
+                            chosen_name = str(row.get("Top3_Name_B", "")).strip()
+                        elif not chosen_email and not pick_val:
+                            # If using Suggested (Top1) but Top columns weren't merged (CSV), fall back
+                            chosen_name = str(row.get("Top1_Name_B", "")) or ""
+                        else:
+                            # Manual email typed in Pick or Chosen_Email: look up in roster
+                            rec_manual = b_lookup_by_email.get(email_to_set)
+                            if rec_manual:
+                                chosen_name = str(rec_manual.get("Full Name", "")).strip()
+                            else:
+                                # Email not found in roster; flag for review
+                                df_joined_events.at[idx, "ReviewFlag"] = "EMAIL_NOT_IN_ROSTER"
+
+                        # Set core fields
                         df_joined_events.at[idx, "Email"] = email_to_set
-                        if not str(row.get("MatchedName_B", "")).strip():
+                        if chosen_name:
+                            df_joined_events.at[idx, "MatchedName_B"] = chosen_name
+                        elif not str(row.get("MatchedName_B", "")).strip():
                             df_joined_events.at[idx, "MatchedName_B"] = row.get("FullName_A", "")
+
+                        # Enrich remaining roster fields using the selected Email
+                        rec = b_lookup_by_email.get(email_to_set)
+                        if rec:
+                            df_joined_events.at[idx, "Category"] = rec.get("Category", "")
+                            df_joined_events.at[idx, "Subcategory"] = rec.get("Subcategory", "")
+                            df_joined_events.at[idx, "Country"] = rec.get("Country", "")
+                            df_joined_events.at[idx, "CC Email"] = rec.get("CC Email", "")
+                            df_joined_events.at[idx, "First Conference"] = rec.get("First Conference", "")
+
                         df_joined_events.at[idx, "MatchSource"] = "USER_ACCEPTED"
-                        df_joined_events.at[idx, "ReviewFlag"] = ""
+                        if df_joined_events.at[idx, "ReviewFlag"] == "EMAIL_NOT_IN_ROSTER":
+                            pass
+                        else:
+                            df_joined_events.at[idx, "ReviewFlag"] = ""
                 elif decision == "REJECT":
                     df_joined_events.at[idx, "Email"] = ""
                     df_joined_events.at[idx, "MatchSource"] = "USER_REJECTED"
