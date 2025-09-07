@@ -328,6 +328,35 @@ def apply_overrides_event_level(
 
 
 
+# Helper: robust credit-hour parser
+from typing import Optional
+
+def parse_credit_hours(val) -> Optional[float]:
+    """Parse credit hours from mixed text like '2.0 Credit Hours' or '2 PDH'.
+    Returns a float or None if not parseable.
+    """
+    if pd.isna(val):
+        return None
+    if isinstance(val, (int, float)):
+        try:
+            return float(val)
+        except Exception:
+            return None
+    s = str(val).strip()
+    if not s:
+        return None
+    # Find the first number in the string, allowing comma or dot decimal separators
+    m = re.search(r'[-+]?\d+[.,]?\d*', s)
+    if not m:
+        return None
+    num_txt = m.group(0)
+    # Normalize decimal comma to dot
+    num_txt = num_txt.replace(',', '.')
+    try:
+        return float(num_txt)
+    except Exception:
+        return None
+
 # ---------------------------
 # Main pipeline
 def _open_path(path: str):
@@ -513,15 +542,23 @@ def run_pipeline(
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    # Load inputs and standardize columns by position
-    df_a_raw = pd.read_excel(file_a, header=0)
+    # Files have a title in row 1; real data starts on row 2. Read with no header and skip the title row.
+    df_a_raw = pd.read_excel(file_a, header=None, skiprows=1)
     df_a = df_a_raw.iloc[:, :3].copy()
     df_a.columns = ["FullName_A", "CreditHours", "EventName"]
+    # Drop rows that are completely empty in those first 3 columns
+    df_a = df_a.dropna(how="all")
+    # Coerce CreditHours from mixed text (e.g., "2.0 Credit Hours") to float
+    df_a["CreditHours"] = df_a["CreditHours"].apply(parse_credit_hours)
     df_a = df_a.dropna(subset=["FullName_A", "CreditHours"])
+    df_a["CreditHours"] = df_a["CreditHours"].astype(float)
 
-    df_b_raw = pd.read_excel(file_b, header=0)
+    # Files have a title in row 1; real data starts on row 2. Read with no header and skip the title row.
+    df_b_raw = pd.read_excel(file_b, header=None, skiprows=1)
     df_b_raw = df_b_raw.iloc[:, :7].copy()
     df_b_raw.columns = ["Category", "Subcategory", "Full Name", "Country", "Email", "CC Email", "First Conference"]
+    # Hard-assert: File B always has Email in column 5 (E); reassign from position to be bulletproof
+    df_b_raw["Email"] = df_b_raw.iloc[:, 4]
 
     # Collapse roster to one row per email and log collisions
     df_b, email_collisions = collapse_roster_by_email(df_b_raw)
@@ -702,8 +739,13 @@ def run_pipeline(
             df_joined_events = df_joined_events.merge(dec, on="FullName_A", how="left")
 
             # Prepare a roster lookup by Email to enrich fields (Category, Subcategory, Country, etc.)
-            bcols = ["Full Name", "Category", "Subcategory", "Country", "Email", "CC Email", "First Conference"]
-            b_lookup_by_email = df_b.dropna(subset=["Email"]).set_index("Email")[bcols].to_dict(orient="index")  # type: ignore
+            bcols = ["Full Name", "Category", "Subcategory", "Country", "CC Email", "First Conference"]
+            # Use positional column 5 (E) for Email to avoid any header/title inconsistencies
+            email_series = df_b.iloc[:, 4]
+            non_null = email_series.notna() & (email_series.astype(str).str.strip() != "")
+            b_lookup_by_email = (
+                df_b.loc[non_null].set_index(email_series[non_null])[bcols].to_dict(orient="index")  # type: ignore
+            )
 
             # Apply decisions (ACCEPT/REJECT) with optional Chosen_Email mapped to Top candidates or Pick
             for idx, row in df_joined_events.iterrows():
